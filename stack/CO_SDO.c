@@ -27,6 +27,11 @@
 #include "CO_driver.h"
 #include "CO_SDO.h"
 #include "crc16-ccitt.h"
+#include "CO_SDO_dynamic.h"
+#include "CO_debug.h"
+#include "modbus_registers.h"
+
+#include <syslog.h>
 
 
 /* Client command specifier, see DS301 */
@@ -124,8 +129,7 @@ void CO_memcpySwap8(void* dest, const void* src){
     cdest[6] = csrc[6];
     cdest[7] = csrc[7];
 }
-#endif
-#ifdef CO_BIG_ENDIAN
+#elif defined(CO_BIG_ENDIAN)
 void CO_memcpySwap2(void* dest, const void* src){
     char *cdest;
     char *csrc;
@@ -158,6 +162,8 @@ void CO_memcpySwap8(void* dest, const void* src){
     cdest[6] = csrc[1];
     cdest[7] = csrc[0];
 }
+#else
+#error Endianness not defined!
 #endif
 
 
@@ -377,10 +383,11 @@ void CO_OD_configure(
         uint8_t                *flags,
         uint8_t                 flagsSize)
 {
-    uint16_t entryNo;
+#if 0
+    const CO_OD_entry_t* entry_object;
 
-    entryNo = CO_OD_find(SDO, index);
-    if(entryNo < 0xFFFFU){
+    entry_object = CO_OD_find(SDO, &SDO->local_object, index);
+    if(!entry_object){
         CO_OD_extension_t *ext = &SDO->ODExtensions[entryNo];
         uint8_t maxSubIndex = SDO->OD[entryNo].maxSubIndex;
 
@@ -397,15 +404,32 @@ void CO_OD_configure(
             ext->flags = NULL;
         }
     }
+#else
+#warning OD Extension system needs reworking
+#endif
 }
 
 
 /******************************************************************************/
-uint16_t CO_OD_find(CO_SDO_t *SDO, uint16_t index){
+/* Source object is used to store generated object if we are pulling from modbus rather than the object dictionary in ROM. */
+const CO_OD_entry_t* CO_OD_find(CO_SDO_t *SDO, CO_OD_entry_t* source_object, uint16_t index){
     /* Fast search in ordered Object Dictionary. If indexes are mixed, this won't work. */
     /* If Object Dictionary has up to 2^N entries, then N is max number of loop passes. */
     uint16_t cur, min, max;
     const CO_OD_entry_t* object;
+
+    /* First check if the object we want is in the Modbus map
+     * (Only bother checking if we've been given an object in which to store the
+     * generated modbus-derived object) */
+
+    if (source_object) {
+        object = CO_lookup_object(index, source_object);
+        /* If we've found the object in our modbus map, we're done */
+        if (object) {
+            return object;
+        }
+    }
+    /* We did not find the object in the Modbus map - Look in the regular object dictionary */
 
     min = 0U;
     max = SDO->ODSize - 1U;
@@ -414,7 +438,7 @@ uint16_t CO_OD_find(CO_SDO_t *SDO, uint16_t index){
         object = &SDO->OD[cur];
         /* Is object matched */
         if(index == object->index){
-            return cur;
+            return object;
         }
         if(index < object->index){
             max = cur;
@@ -428,19 +452,18 @@ uint16_t CO_OD_find(CO_SDO_t *SDO, uint16_t index){
         object = &SDO->OD[min];
         /* Is object matched */
         if(index == object->index){
-            return min;
+            return object;
         }
     }
 
-    return 0xFFFFU;  /* object does not exist in OD */
+    return NULL;  /* object does not exist in OD */
 }
 
 
 /******************************************************************************/
-uint16_t CO_OD_getLength(CO_SDO_t *SDO, uint16_t entryNo, uint8_t subIndex){
-    const CO_OD_entry_t* object = &SDO->OD[entryNo];
+uint16_t CO_OD_getLength(CO_SDO_t *SDO, const CO_OD_entry_t* object, uint8_t subIndex){
 
-    if(entryNo == 0xFFFFU){
+    if(!object){
         return 0U;
     }
 
@@ -477,10 +500,9 @@ uint16_t CO_OD_getLength(CO_SDO_t *SDO, uint16_t entryNo, uint8_t subIndex){
 
 
 /******************************************************************************/
-uint16_t CO_OD_getAttribute(CO_SDO_t *SDO, uint16_t entryNo, uint8_t subIndex){
-    const CO_OD_entry_t* object = &SDO->OD[entryNo];
+uint16_t CO_OD_getAttribute(CO_SDO_t *SDO, const CO_OD_entry_t* object, uint8_t subIndex){
 
-    if(entryNo == 0xFFFFU){
+    if(!object){
         return 0U;
     }
 
@@ -511,11 +533,16 @@ uint16_t CO_OD_getAttribute(CO_SDO_t *SDO, uint16_t entryNo, uint8_t subIndex){
 
 
 /******************************************************************************/
-void* CO_OD_getDataPointer(CO_SDO_t *SDO, uint16_t entryNo, uint8_t subIndex){
-    const CO_OD_entry_t* object = &SDO->OD[entryNo];
+void* CO_OD_getDataPointer(CO_SDO_t *SDO, const CO_OD_entry_t* object, uint8_t subIndex){
 
-    if(entryNo == 0xFFFFU){
+    if(!object){
         return 0;
+    }
+
+    if (object->attribute & CO_ODA_FROM_MODBUS) {
+        /* When reading from modbus, there is no real data location we can point to.
+         * Instead, we get the data just-in-time, using the SDO data buffer as temporary storage */
+        return SDO->databuffer;
     }
 
     if(object->maxSubIndex == 0U){   /* Object type is Var */
@@ -545,51 +572,64 @@ void* CO_OD_getDataPointer(CO_SDO_t *SDO, uint16_t entryNo, uint8_t subIndex){
 
 
 /******************************************************************************/
-uint8_t* CO_OD_getFlagsPointer(CO_SDO_t *SDO, uint16_t entryNo, uint8_t subIndex){
+uint8_t* CO_OD_getFlagsPointer(CO_SDO_t *SDO, const CO_OD_entry_t* object, uint8_t subIndex){
     CO_OD_extension_t* ext;
 
-    if((entryNo == 0xFFFFU) || (SDO->ODExtensions == 0)){
+    if(!object || (SDO->ODExtensions == 0)){
         return 0;
     }
-
+#if 0
     ext = &SDO->ODExtensions[entryNo];
 
     return &ext->flags[subIndex];
+#else
+    return 0;
+#warning OD Extensions system needs reworking
+#endif
 }
 
 
 /******************************************************************************/
 uint32_t CO_SDO_initTransfer(CO_SDO_t *SDO, uint16_t index, uint8_t subIndex){
 
+    const CO_OD_entry_t* object;
+
     SDO->ODF_arg.index = index;
     SDO->ODF_arg.subIndex = subIndex;
 
     /* find object in Object Dictionary */
-    SDO->entryNo = CO_OD_find(SDO, index);
-    if(SDO->entryNo == 0xFFFFU){
+    object = CO_OD_find(SDO, &SDO->local_object, index);
+    SDO->object = object;
+    if(!object){
         return CO_SDO_AB_NOT_EXIST ;     /* object does not exist in OD */
     }
+    CO_DBG("Found SDO Object\n");
 
     /* verify existance of subIndex */
-    if(subIndex > SDO->OD[SDO->entryNo].maxSubIndex &&
-            SDO->OD[SDO->entryNo].pData != NULL)
+    if(subIndex > object->maxSubIndex &&
+            object->pData != NULL)
     {
         return CO_SDO_AB_SUB_UNKNOWN;     /* Sub-index does not exist. */
     }
+    CO_DBG("Found SDO Subindex\n");
 
     /* pointer to data in Object dictionary */
-    SDO->ODF_arg.ODdataStorage = CO_OD_getDataPointer(SDO, SDO->entryNo, subIndex);
+    SDO->ODF_arg.ODdataStorage = CO_OD_getDataPointer(SDO, object, subIndex);
 
     /* fill ODF_arg */
     SDO->ODF_arg.object = NULL;
     if(SDO->ODExtensions){
+#if 0
         CO_OD_extension_t *ext = &SDO->ODExtensions[SDO->entryNo];
         SDO->ODF_arg.object = ext->object;
+#else
+#warning OD Extension system needs rework
+#endif
     }
     SDO->ODF_arg.data = SDO->databuffer;
-    SDO->ODF_arg.dataLength = CO_OD_getLength(SDO, SDO->entryNo, subIndex);
-    SDO->ODF_arg.attribute = CO_OD_getAttribute(SDO, SDO->entryNo, subIndex);
-    SDO->ODF_arg.pFlags = CO_OD_getFlagsPointer(SDO, SDO->entryNo, subIndex);
+    SDO->ODF_arg.dataLength = CO_OD_getLength(SDO, object, subIndex);
+    SDO->ODF_arg.attribute = CO_OD_getAttribute(SDO, object, subIndex);
+    SDO->ODF_arg.pFlags = CO_OD_getFlagsPointer(SDO, object, subIndex);
 
     SDO->ODF_arg.firstSegment = true;
     SDO->ODF_arg.lastSegment = true;
@@ -603,10 +643,13 @@ uint32_t CO_SDO_initTransfer(CO_SDO_t *SDO, uint16_t index, uint8_t subIndex){
     if(SDO->ODF_arg.dataLength > CO_SDO_BUFFER_SIZE){
         return CO_SDO_AB_DEVICE_INCOMPAT;     /* general internal incompatibility in the device */
     }
-
+    if (SDO->ODF_arg.data) {
+        CO_DBG("Found SDO OK\n");
+    }
     return 0U;
 }
 
+/* Read OD: The other device reads data FROM us */
 
 /******************************************************************************/
 uint32_t CO_SDO_readOD(CO_SDO_t *SDO, uint16_t SDOBufferSize){
@@ -621,18 +664,23 @@ uint32_t CO_SDO_readOD(CO_SDO_t *SDO, uint16_t SDOBufferSize){
 
     /* find extension */
     if(SDO->ODExtensions != NULL){
+#if 0
         ext = &SDO->ODExtensions[SDO->entryNo];
+#else
+#warning OD Extension system needs rework
+#endif
     }
 
     CO_LOCK_OD();
 
     /* copy data from OD to SDO buffer if not domain */
     if(ODdata != NULL){
+        /* This will be redundant in some cases, such as when using modbus */
         while(length--) *(SDObuffer++) = *(ODdata++);
     }
     /* if domain, Object dictionary function MUST exist */
     else{
-        if(ext->pODFunc == NULL){
+        if(ext == NULL || ext->pODFunc == NULL){
             CO_UNLOCK_OD();
             return CO_SDO_AB_DEVICE_INCOMPAT;     /* general internal incompatibility in the device */
         }
@@ -640,7 +688,7 @@ uint32_t CO_SDO_readOD(CO_SDO_t *SDO, uint16_t SDOBufferSize){
 
     /* call Object dictionary function if registered */
     SDO->ODF_arg.reading = true;
-    if(ext->pODFunc != NULL){
+    if(ext != NULL && ext->pODFunc != NULL){
         uint32_t abortCode = ext->pODFunc(&SDO->ODF_arg);
         if(abortCode != 0U){
             CO_UNLOCK_OD();
@@ -675,9 +723,29 @@ uint32_t CO_SDO_readOD(CO_SDO_t *SDO, uint16_t SDOBufferSize){
     }
 #endif
 
+    /* BEGIN MODBUS INTEGRATION */
+    if (SDO->ODF_arg.attribute & CO_ODA_FROM_MODBUS) {
+        if (SDO->object->pData) {
+            modbusreg_t *mbr = (modbusreg_t *)SDO->object->pData;
+            if (mbr->getter) {
+                /* Pass this data to our modbus "Getter" function. */
+                bool result = mbr->getter(mbr, SDO->ODF_arg.data);
+                if (!result) {
+                    return CO_SDO_AB_DATA_TRANSF;
+                }
+            } else {
+                return CO_SDO_AB_NOT_EXIST;
+            }
+        } else {
+            return CO_SDO_AB_NOT_EXIST;
+        }
+    }
+        /* END MODBUS INTEGRATION */
+
     return 0U;
 }
 
+/* Write OD: The other device writes data TO us. */
 
 /******************************************************************************/
 uint32_t CO_SDO_writeOD(CO_SDO_t *SDO, uint16_t length){
@@ -721,6 +789,7 @@ uint32_t CO_SDO_writeOD(CO_SDO_t *SDO, uint16_t length){
     /* call Object dictionary function if registered */
     SDO->ODF_arg.reading = false;
     if(SDO->ODExtensions != NULL){
+#if 0
         CO_OD_extension_t *ext = &SDO->ODExtensions[SDO->entryNo];
 
         if(ext->pODFunc != NULL){
@@ -730,6 +799,9 @@ uint32_t CO_SDO_writeOD(CO_SDO_t *SDO, uint16_t length){
                 return abortCode;
             }
         }
+#else
+#warning OD Extension system needs rework
+#endif
     }
     SDO->ODF_arg.offset += SDO->ODF_arg.dataLength;
     SDO->ODF_arg.firstSegment = false;
@@ -747,7 +819,24 @@ uint32_t CO_SDO_writeOD(CO_SDO_t *SDO, uint16_t length){
     }
 
     CO_UNLOCK_OD();
-
+/* BEGIN MODBUS INTEGRATION */
+    if (SDO->ODF_arg.attribute & CO_ODA_FROM_MODBUS) {
+      if (SDO->object->pData) {
+          modbusreg_t *mbr = (modbusreg_t*)SDO->object->pData;
+          if (mbr->setter) {
+            /* Pass this data to our modbus "Setter" function. */
+              bool result = mbr->setter(mbr, SDO->ODF_arg.data);
+              if (!result) {
+                  return CO_SDO_AB_DATA_TRANSF;
+              }
+          } else {
+              return CO_SDO_AB_NOT_EXIST;
+          }
+      } else {
+          return CO_SDO_AB_NOT_EXIST;
+      }
+    }
+    /* END MODBUS INTEGRATION */
     return 0;
 }
 
@@ -826,7 +915,7 @@ int8_t CO_SDO_process(
             index = SDO->CANrxData[2];
             index = index << 8 | SDO->CANrxData[1];
             abortCode = CO_SDO_initTransfer(SDO, index, SDO->CANrxData[3]);
-            if(abortCode != 0U){
+             if(abortCode != 0U){
                 CO_SDO_abort(SDO, abortCode);
                 return -1;
             }
@@ -851,12 +940,14 @@ int8_t CO_SDO_process(
             else{
                 abortCode = CO_SDO_readOD(SDO, CO_SDO_BUFFER_SIZE);
                 if(abortCode != 0U){
+                    syslog(LOG_INFO, "Failed to read OD (%d)!\n", abortCode);
                     CO_SDO_abort(SDO, abortCode);
                     return -1;
                 }
 
                 /* if data size is large enough set state machine to block upload, otherwise set to normal transfer */
                 if((CCS == CCS_UPLOAD_BLOCK) && (SDO->ODF_arg.dataLength > SDO->CANrxData[5])){
+                    CO_DBG("Starting block transfer!\n");
                     state = CO_SDO_ST_UPLOAD_BL_INITIATE;
                 }
                 else{
@@ -879,6 +970,7 @@ int8_t CO_SDO_process(
             state = CO_SDO_ST_DOWNLOAD_BL_SUB_RESP_2;
         }
         else{
+            syslog(LOG_INFO, "SDO Abort: Timed out!!\n");
             CO_SDO_abort(SDO, CO_SDO_AB_TIMEOUT); /* SDO protocol timed out */
             return -1;
         }
@@ -1158,6 +1250,7 @@ int8_t CO_SDO_process(
         }
 
         case CO_SDO_ST_UPLOAD_INITIATE:{
+            CO_DBG("SDO upload initiate\n");
             /* default response */
             SDO->CANtxBuff->data[1] = SDO->CANrxData[1];
             SDO->CANtxBuff->data[2] = SDO->CANrxData[2];
@@ -1223,7 +1316,7 @@ int8_t CO_SDO_process(
 
                 /* move the beginning of the data buffer */
                 SDO->ODF_arg.data += len;
-                SDO->ODF_arg.dataLength = CO_OD_getLength(SDO, SDO->entryNo, SDO->ODF_arg.subIndex) - len;
+                SDO->ODF_arg.dataLength = CO_OD_getLength(SDO, SDO->object, SDO->ODF_arg.subIndex) - len;
 
                 /* read next data from Object dictionary function */
                 abortCode = CO_SDO_readOD(SDO, CO_SDO_BUFFER_SIZE);
@@ -1323,7 +1416,7 @@ int8_t CO_SDO_process(
             SDO->state = CO_SDO_ST_UPLOAD_BL_SUBBLOCK;
             /* continue in next case */
         }
-        // fallthrough
+        /* No break */
 
         case CO_SDO_ST_UPLOAD_BL_SUBBLOCK:{
             /* is block confirmation received */
@@ -1376,7 +1469,7 @@ int8_t CO_SDO_process(
                     /* move the beginning of the data buffer */
                     len = SDO->ODF_arg.dataLength; /* length of valid data in buffer */
                     SDO->ODF_arg.data += len;
-                    SDO->ODF_arg.dataLength = CO_OD_getLength(SDO, SDO->entryNo, SDO->ODF_arg.subIndex) - len;
+                    SDO->ODF_arg.dataLength = CO_OD_getLength(SDO, SDO->object, SDO->ODF_arg.subIndex) - len;
 
                     /* read next data from Object dictionary function */
                     abortCode = CO_SDO_readOD(SDO, CO_SDO_BUFFER_SIZE);
@@ -1477,6 +1570,7 @@ int8_t CO_SDO_process(
     /* free buffer and send message */
     CLEAR_CANrxNew(SDO->CANrxNew);
     if(sendResponse) {
+        CO_DBG("SDO Send Response\n");
         CO_CANsend(SDO->CANdevTx, SDO->CANtxBuff);
     }
 

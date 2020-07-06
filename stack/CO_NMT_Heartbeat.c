@@ -29,6 +29,8 @@
 #include "CO_Emergency.h"
 #include "CO_NMT_Heartbeat.h"
 
+#include <syslog.h>
+
 /*
  * Read received message from CAN module.
  *
@@ -211,6 +213,11 @@ CO_NMT_reset_cmd_t CO_NMT_process(
     uint8_t currentOperatingState = NMT->operatingState;
 
     NMT->HBproducerTimer += timeDifference_ms;
+
+//    static int i = 0;
+//    if (i++%97==0) {
+//        syslog(LOG_INFO, "NMT: %d, %d, %d\n", HBtime, NMT->HBproducerTimer, NMT->operatingState);
+//    }
 
     /* Heartbeat producer message & Bootup message */
     if((HBtime != 0 && NMT->HBproducerTimer >= HBtime) || NMT->operatingState == CO_NMT_INITIALIZING){

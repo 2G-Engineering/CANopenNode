@@ -195,7 +195,7 @@ static uint32_t CO_PDOfindMap(
         uint8_t                *pSendIfCOSFlags,
         uint8_t                *pIsMultibyteVar)
 {
-    uint16_t entryNo;
+    const CO_OD_entry_t* object;
     uint16_t index;
     uint8_t subIndex;
     uint8_t dataLen;
@@ -235,28 +235,29 @@ static uint32_t CO_PDOfindMap(
         return 0;
     }
 
+    /*FIXME additional support required for PDOs */
     /* find object in Object Dictionary */
-    entryNo = CO_OD_find(SDO, index);
+    object = CO_OD_find(SDO, NULL, index);
 
     /* Does object exist in OD? */
-    if(entryNo == 0xFFFF || subIndex > SDO->OD[entryNo].maxSubIndex)
+    if(!object || subIndex > object->maxSubIndex)
         return CO_SDO_AB_NOT_EXIST;   /* Object does not exist in the object dictionary. */
 
-    attr = CO_OD_getAttribute(SDO, entryNo, subIndex);
+    attr = CO_OD_getAttribute(SDO, object, subIndex);
     /* Is object Mappable for RPDO? */
     if(R_T==0 && !((attr&CO_ODA_RPDO_MAPABLE) && (attr&CO_ODA_WRITEABLE))) return CO_SDO_AB_NO_MAP;   /* Object cannot be mapped to the PDO. */
     /* Is object Mappable for TPDO? */
     if(R_T!=0 && !((attr&CO_ODA_TPDO_MAPABLE) && (attr&CO_ODA_READABLE))) return CO_SDO_AB_NO_MAP;   /* Object cannot be mapped to the PDO. */
 
     /* is size of variable big enough for map */
-    objectLen = CO_OD_getLength(SDO, entryNo, subIndex);
+    objectLen = CO_OD_getLength(SDO, object, subIndex);
     if(objectLen < dataLen) return CO_SDO_AB_NO_MAP;   /* Object cannot be mapped to the PDO. */
 
     /* mark multibyte variable */
     *pIsMultibyteVar = (attr&CO_ODA_MB_VALUE) ? 1 : 0;
 
     /* pointer to data */
-    *ppData = (uint8_t*) CO_OD_getDataPointer(SDO, entryNo, subIndex);
+    *ppData = (uint8_t*) CO_OD_getDataPointer(SDO, object, subIndex);
 #ifdef CO_BIG_ENDIAN
     /* skip unused MSB bytes */
     if(*pIsMultibyteVar){
@@ -861,8 +862,8 @@ int16_t CO_TPDOsend(CO_TPDO_t *TPDO){
             uint32_t map = *(pMap++);
             uint16_t index = (uint16_t)(map>>16);
             uint8_t subIndex = (uint8_t)(map>>8);
-            uint16_t entryNo = CO_OD_find(pSDO, index);
-            if ( entryNo == 0xFFFF ) continue;
+            const CO_OD_entry_t* object = CO_OD_find(pSDO, NULL, index);
+            if ( !object ) continue;
             CO_OD_extension_t *ext = &pSDO->ODExtensions[entryNo];
             if( ext->pODFunc == NULL) continue;
             CO_ODF_arg_t ODF_arg;
@@ -871,10 +872,10 @@ int16_t CO_TPDOsend(CO_TPDO_t *TPDO){
             ODF_arg.index = index;
             ODF_arg.subIndex = subIndex;
             ODF_arg.object = ext->object;
-            ODF_arg.attribute = CO_OD_getAttribute(pSDO, entryNo, subIndex);
-            ODF_arg.pFlags = CO_OD_getFlagsPointer(pSDO, entryNo, subIndex);
-            ODF_arg.data = CO_OD_getDataPointer(pSDO, entryNo, subIndex); //https://github.com/CANopenNode/CANopenNode/issues/100
-            ODF_arg.dataLength = CO_OD_getLength(pSDO, entryNo, subIndex);
+            ODF_arg.attribute = CO_OD_getAttribute(pSDO, object, subIndex);
+            ODF_arg.pFlags = CO_OD_getFlagsPointer(pSDO, object, subIndex);
+            ODF_arg.data = CO_OD_getDataPointer(pSDO, object, subIndex); //https://github.com/CANopenNode/CANopenNode/issues/100
+            ODF_arg.dataLength = CO_OD_getLength(pSDO, object, subIndex);
             ext->pODFunc(&ODF_arg);
         }
     }
@@ -945,8 +946,8 @@ void CO_RPDO_process(CO_RPDO_t *RPDO, bool_t syncWas){
                 uint32_t map = *(pMap++);
                 uint16_t index = (uint16_t)(map>>16);
                 uint8_t subIndex = (uint8_t)(map>>8);
-                uint16_t entryNo = CO_OD_find(pSDO, index);
-                if ( entryNo == 0xFFFF ) continue;
+                const CO_OD_entry_t* object = CO_OD_find(pSDO, NULL, index);
+                if ( !object ) continue;
                 CO_OD_extension_t *ext = &pSDO->ODExtensions[entryNo];
                 if( ext->pODFunc == NULL) continue;
                 CO_ODF_arg_t ODF_arg;
@@ -955,10 +956,10 @@ void CO_RPDO_process(CO_RPDO_t *RPDO, bool_t syncWas){
                 ODF_arg.index = index;
                 ODF_arg.subIndex = subIndex;
                 ODF_arg.object = ext->object;
-                ODF_arg.attribute = CO_OD_getAttribute(pSDO, entryNo, subIndex);
-                ODF_arg.pFlags = CO_OD_getFlagsPointer(pSDO, entryNo, subIndex);
-                ODF_arg.data = CO_OD_getDataPointer(pSDO, entryNo, subIndex); //https://github.com/CANopenNode/CANopenNode/issues/100
-                ODF_arg.dataLength = CO_OD_getLength(pSDO, entryNo, subIndex);
+                ODF_arg.attribute = CO_OD_getAttribute(pSDO, object, subIndex);
+                ODF_arg.pFlags = CO_OD_getFlagsPointer(pSDO, object, subIndex);
+                ODF_arg.data = CO_OD_getDataPointer(pSDO, object, subIndex); //https://github.com/CANopenNode/CANopenNode/issues/100
+                ODF_arg.dataLength = CO_OD_getLength(pSDO, object, subIndex);
                 ext->pODFunc(&ODF_arg);
             }
         }

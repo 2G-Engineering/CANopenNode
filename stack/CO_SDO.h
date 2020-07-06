@@ -335,7 +335,7 @@ typedef enum{
  * Value can be in range from 7 to 889 bytes.
  */
     #ifndef CO_SDO_BUFFER_SIZE
-        #define CO_SDO_BUFFER_SIZE    32
+        #define CO_SDO_BUFFER_SIZE    256
     #endif
 
 
@@ -353,7 +353,8 @@ typedef enum{
     CO_ODA_TPDO_DETECT_COS  = 0x0040U,  /**< If variable is mapped to any PDO, then
                                              PDO is automatically send, if variable
                                              changes its value */
-    CO_ODA_MB_VALUE         = 0x0080U   /**< True when variable is a multibyte value */
+    CO_ODA_MB_VALUE         = 0x0080U,  /**< True when variable is a multibyte value */
+    CO_ODA_FROM_MODBUS      = 0x0100U,  /**< True when variable is dynamically pulled from Modbus instead of from a static OD.*/
 }CO_SDO_OD_attributes_t;
 
 
@@ -495,7 +496,8 @@ typedef struct {
     include Sub-Object 0.
     If object type is Record, pData is pointer to special array
     with members of type CO_OD_entryRecord_t.
-    If object type is Domain, pData is null. */
+    If object type is Domain, pData is null.
+    If object is from Modbus, pData is pointer to mbreg structure.*/
     void               *pData;
 }CO_OD_entry_t;
 
@@ -534,7 +536,7 @@ typedef struct{
     uint8_t            *data;
     /** Pointer to location in object dictionary, where data are stored.
     (informative reference to old data, read only). Data have the same
-    endianes as processor. If data type is Domain, this variable is null. */
+    endianness as processor. If data type is Domain, this variable is null. */
     const void         *ODdataStorage;
     /** Length of data in the above buffer. Read only, except for domain. If
     data type is domain see @ref CO_SDO_OD_function for special rules by upload. */
@@ -605,6 +607,10 @@ typedef struct{
     uint16_t            bufferOffset;
     /** Sequence number of OD entry as returned from CO_OD_find() */
     uint16_t            entryNo;
+    /** A local instance of an OD object, used when dynamically generating objects from Modbus */
+    CO_OD_entry_t local_object;
+    /** Reference to the object that we are currently working with */
+    const CO_OD_entry_t* object;
     /** CO_ODF_arg_t object with additional variables. Reference to this object
     is passed to @ref CO_SDO_OD_function */
     CO_ODF_arg_t        ODF_arg;
@@ -849,11 +855,13 @@ void CO_OD_configure(
  * Find object with specific index in Object dictionary.
  *
  * @param SDO This object.
+ * @param source_object a pointer to an object to use for storage of a dynamically generated object,
+ * if you wish to attempt dynamic object generation from Modbus map
  * @param index Index of the object in Object dictionary.
  *
- * @return Sequence number of the @ref CO_SDO_objectDictionary entry, 0xFFFF if not found.
+ * @return Pointer to the object dictionary entry, NULL if not found.
  */
-uint16_t CO_OD_find(CO_SDO_t *SDO, uint16_t index);
+const CO_OD_entry_t* CO_OD_find(CO_SDO_t *SDO, CO_OD_entry_t* source_object, uint16_t index);
 
 
 /**
@@ -865,7 +873,7 @@ uint16_t CO_OD_find(CO_SDO_t *SDO, uint16_t index);
  *
  * @return Data length of the variable.
  */
-uint16_t CO_OD_getLength(CO_SDO_t *SDO, uint16_t entryNo, uint8_t subIndex);
+uint16_t CO_OD_getLength(CO_SDO_t *SDO, const CO_OD_entry_t* object, uint8_t subIndex);
 
 
 /**
@@ -881,7 +889,7 @@ uint16_t CO_OD_getLength(CO_SDO_t *SDO, uint16_t entryNo, uint8_t subIndex);
  *
  * @return Attribute of the variable.
  */
-uint16_t CO_OD_getAttribute(CO_SDO_t *SDO, uint16_t entryNo, uint8_t subIndex);
+uint16_t CO_OD_getAttribute(CO_SDO_t *SDO, const CO_OD_entry_t* object, uint8_t subIndex);
 
 
 /**
@@ -896,7 +904,7 @@ uint16_t CO_OD_getAttribute(CO_SDO_t *SDO, uint16_t entryNo, uint8_t subIndex);
  *
  * @return Pointer to the variable in @ref CO_SDO_objectDictionary.
  */
-void* CO_OD_getDataPointer(CO_SDO_t *SDO, uint16_t entryNo, uint8_t subIndex);
+void* CO_OD_getDataPointer(CO_SDO_t *SDO, const CO_OD_entry_t* object, uint8_t subIndex);
 
 
 /**
@@ -909,7 +917,7 @@ void* CO_OD_getDataPointer(CO_SDO_t *SDO, uint16_t entryNo, uint8_t subIndex);
  *
  * @return Pointer to the #CO_SDO_OD_flags_t of the variable.
  */
-uint8_t* CO_OD_getFlagsPointer(CO_SDO_t *SDO, uint16_t entryNo, uint8_t subIndex);
+uint8_t* CO_OD_getFlagsPointer(CO_SDO_t *SDO, const CO_OD_entry_t* object, uint8_t subIndex);
 
 
 /**
